@@ -1,0 +1,92 @@
+# ==============================
+# Dependencies
+# ==============================
+node_modules/
+
+# ==============================
+# Expo
+# ==============================
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# ==============================
+# Native - Android
+# ==============================
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+
+# ==============================
+# Native - iOS
+# ==============================
+ios/Pods/
+ios/build/
+ios/*.xcworkspace/xcuserdata/
+
+# ==============================
+# Signing & Certificates
+# ==============================
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.keystore
+*.mobileprovision
+*.cer
+*.pem
+
+# ==============================
+# Metro Bundler
+# ==============================
+.metro-health-check*
+
+# ==============================
+# Debug logs
+# ==============================
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+*.log
+
+# ==============================
+# Environment variables
+# ==============================
+.env
+.env.local
+.env*.local
+
+# ==============================
+# OS files
+# ==============================
+.DS_Store
+Thumbs.db
+ehthumbs.db
+.editorconfig
+*~
+
+# ==============================
+# Editor / IDE
+# ==============================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# ==============================
+# TypeScript
+# ==============================
+*.tsbuildinfo
+
+# ==============================
+# Tools
+# ==============================
+.opencode/
+.bolt/
