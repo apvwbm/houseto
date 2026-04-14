@@ -7,11 +7,12 @@ import {
   ActivityIndicator,
   ScrollView,
   Image,
+  TextInput,
 } from 'react-native';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { Plus, Check } from 'lucide-react-native';
+import { Plus, Check, Search, X } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
 import { Receta } from '@/lib/types';
 import { useLookups } from '@/hooks/useLookups';
@@ -23,6 +24,7 @@ export default function RecetasScreen() {
   const [recetas, setRecetas] = useState<Receta[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedCategorias, setSelectedCategorias] = useState<string[]>([]);
+  const [busqueda, setBusqueda] = useState('');
 
   const fetchRecetas = useCallback(async () => {
     setLoading(true);
@@ -51,11 +53,25 @@ export default function RecetasScreen() {
     };
   }, [fetchRecetas]);
 
-  const filteredRecetas = selectedCategorias.length === 0
-    ? recetas
-    : recetas.filter((r) =>
+  const filteredRecetas = useMemo(() => {
+    let resultado = recetas;
+
+    if (selectedCategorias.length > 0) {
+      resultado = resultado.filter((r) =>
         r.categorias.some((c) => selectedCategorias.includes(c))
       );
+    }
+
+    if (busqueda.trim()) {
+      const q = busqueda.toLowerCase().trim();
+      resultado = resultado.filter(
+        (r) =>
+          r.nombre.toLowerCase().includes(q)
+      );
+    }
+
+    return resultado;
+  }, [recetas, selectedCategorias, busqueda]);
 
   const toggleCategoria = (cat: string) => {
     setSelectedCategorias((prev) =>
@@ -107,6 +123,23 @@ export default function RecetasScreen() {
         </TouchableOpacity>
       </View>
 
+      {/* Buscador */}
+      <View style={styles.searchContainer}>
+        <Search size={16} color={colors.textMuted} strokeWidth={2} />
+        <TextInput
+          style={styles.searchInput}
+          value={busqueda}
+          onChangeText={setBusqueda}
+          placeholder="Buscar receta..."
+          placeholderTextColor={colors.textMuted}
+        />
+        {busqueda.length > 0 && (
+          <TouchableOpacity onPress={() => setBusqueda('')} activeOpacity={0.7}>
+            <X size={16} color={colors.textMuted} strokeWidth={2} />
+          </TouchableOpacity>
+        )}
+      </View>
+
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
@@ -143,14 +176,20 @@ export default function RecetasScreen() {
       ) : filteredRecetas.length === 0 ? (
         <View style={styles.emptyState}>
           <Text style={styles.emptyText}>
-            {selectedCategorias.length > 0 ? 'Sin recetas en esta categoría' : 'Sin recetas'}
+            {busqueda.trim()
+              ? `Sin resultados para "${busqueda}"`
+              : selectedCategorias.length > 0
+                ? 'Sin recetas en esta categoría'
+                : 'Sin recetas'}
           </Text>
-          <TouchableOpacity
-            onPress={() => router.push('/recetas/nueva')}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.emptyLink}>+ Añadir receta</Text>
-          </TouchableOpacity>
+          {!busqueda.trim() && (
+            <TouchableOpacity
+              onPress={() => router.push('/recetas/nueva')}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.emptyLink}>+ Añadir receta</Text>
+            </TouchableOpacity>
+          )}
         </View>
       ) : (
         <FlatList
@@ -192,6 +231,26 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginHorizontal: spacing.xl,
+    marginBottom: spacing.md,
+    paddingHorizontal: spacing.md,
+    gap: spacing.sm,
+    height: 40,
+  },
+  searchInput: {
+    flex: 1,
+    fontFamily: 'Nunito-Regular',
+    fontSize: fontSize.sm,
+    color: colors.text,
+    paddingVertical: 0,
   },
   filterScroll: {
     flexGrow: 0,
@@ -237,9 +296,11 @@ const styles = StyleSheet.create({
   gridRow: {
     gap: spacing.lg,
     justifyContent: 'space-between',
+    marginBottom: spacing.lg,
   },
   recetaCard: {
     flex: 1,
+    maxWidth: '48%',
     backgroundColor: colors.surface,
     borderRadius: radius.md,
     padding: spacing.md,
@@ -287,6 +348,8 @@ const styles = StyleSheet.create({
   categoriaTag: {
     fontFamily: 'Nunito-SemiBold',
     fontSize: fontSize.xs,
+    lineHeight: fontSize.xs,
+    maxHeight: fontSize.xs + 4,
     color: colors.primary,
     backgroundColor: colors.primaryLight,
     paddingHorizontal: 6,

@@ -5,7 +5,6 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  Alert,
   KeyboardAvoidingView,
   Platform,
   Image,
@@ -16,7 +15,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { X, Check, Camera, Film } from 'lucide-react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '@/lib/supabase';
-import { uploadRecetaFoto, isRemoteUrl } from '@/lib/storage';
+import { uploadRecetaFoto, uploadRecetaVideo, isRemoteUrl } from '@/lib/storage';
 import { Receta } from '@/lib/types';
 import { useLookups } from '@/hooks/useLookups';
 import { colors, fontSize, spacing, radius } from '@/lib/theme';
@@ -94,13 +93,28 @@ export default function NuevaRecetaScreen() {
         fotoUrl = uploaded;
       }
 
+      // Si hay video local (tipo file), subirlo a Supabase Storage
+      let videoValor: string | null = form.video_valor?.trim() || null;
+      let videoTipo = form.video_tipo;
+      if (videoValor && videoTipo === 'file' && !isRemoteUrl(videoValor)) {
+        const uploaded = await uploadRecetaVideo(videoValor);
+        if (!uploaded) {
+          setError('Error al subir el video. Inténtalo de nuevo.');
+          setSaving(false);
+          return;
+        }
+        videoValor = uploaded;
+        // Una vez subido, el valor es una URL pública
+        videoTipo = 'url';
+      }
+
       const data: Partial<Receta> = {
         nombre: form.nombre.trim(),
         descripcion: form.descripcion.trim(),
         categorias: form.categorias,
         numero_personas: personas,
-        video_tipo: form.video_tipo,
-        video_valor: form.video_valor?.trim() || null,
+        video_tipo: videoTipo,
+        video_valor: videoValor,
         foto: fotoUrl,
       };
 
@@ -260,15 +274,52 @@ export default function NuevaRecetaScreen() {
                   <View style={styles.videoPlaceholder}>
                     <Film size={24} color={colors.textMuted} strokeWidth={2} />
                     <Text style={styles.videoFileName} numberOfLines={1}>
-                      {form.video_tipo === 'url' ? form.video_valor : 'Video seleccionado'}
+                      {form.video_tipo === 'url'
+                        ? form.video_valor
+                        : 'Video seleccionado'}
                     </Text>
                   </View>
                   <TouchableOpacity
                     style={styles.mediaRemoveBtn}
-                    onPress={() => setForm((f) => ({ ...f, video_tipo: null, video_valor: '' }))}
+                    onPress={() =>
+                      setForm((f) => ({
+                        ...f,
+                        video_tipo: null,
+                        video_valor: '',
+                      }))
+                    }
                     activeOpacity={0.7}
                   >
                     <X size={16} color={colors.error} strokeWidth={2.5} />
+                  </TouchableOpacity>
+                </View>
+              ) : form.video_tipo === 'url' ? (
+                /* Modo URL: mostrar input de texto */
+                <View style={styles.videoUrlRow}>
+                  <TextInput
+                    style={[styles.input, { flex: 1 }]}
+                    value={form.video_valor}
+                    onChangeText={(v) =>
+                      setForm((f) => ({ ...f, video_valor: v }))
+                    }
+                    placeholder="https://youtube.com/..."
+                    placeholderTextColor={colors.textMuted}
+                    autoFocus
+                    autoCapitalize="none"
+                    keyboardType="url"
+                  />
+                  <TouchableOpacity
+                    style={styles.videoUrlCancel}
+                    onPress={() =>
+                      setForm((f) => ({
+                        ...f,
+                        video_tipo: null,
+                        video_valor: '',
+                      }))
+                    }
+                    activeOpacity={0.7}
+                  >
+                    <X size={18} color={colors.textMuted} strokeWidth={2} />
                   </TouchableOpacity>
                 </View>
               ) : (
@@ -295,30 +346,18 @@ export default function NuevaRecetaScreen() {
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.pickerBtn, { flex: 1 }]}
-                    onPress={() => {
-                      Alert.prompt
-                        ? Alert.prompt('URL del video', 'Pega la URL del video', (url) => {
-                            if (url?.trim()) {
-                              setForm((f) => ({ ...f, video_tipo: 'url', video_valor: url.trim() }));
-                            }
-                          })
-                        : setForm((f) => ({ ...f, video_tipo: 'url', video_valor: '' }));
-                    }}
+                    onPress={() =>
+                      setForm((f) => ({
+                        ...f,
+                        video_tipo: 'url',
+                        video_valor: '',
+                      }))
+                    }
                     activeOpacity={0.8}
                   >
                     <Text style={styles.pickerBtnText}>Pegar URL</Text>
                   </TouchableOpacity>
                 </View>
-              )}
-              {form.video_tipo === 'url' && !form.video_valor && (
-                <TextInput
-                  style={[styles.input, { marginTop: spacing.sm }]}
-                  value={form.video_valor}
-                  onChangeText={(v) => setForm((f) => ({ ...f, video_valor: v }))}
-                  placeholder="https://..."
-                  placeholderTextColor={colors.textMuted}
-                  autoFocus
-                />
               )}
             </View>
 
@@ -446,6 +485,14 @@ const styles = StyleSheet.create({
   pickerRow: {
     flexDirection: 'row',
     gap: spacing.sm,
+  },
+  videoUrlRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  videoUrlCancel: {
+    padding: spacing.sm,
   },
   mediaPreview: {
     flexDirection: 'row',

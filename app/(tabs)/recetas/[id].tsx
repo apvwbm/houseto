@@ -14,6 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Trash2 } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
+import { isRemoteUrl } from '@/lib/storage';
 import { Receta } from '@/lib/types';
 import { colors, fontSize, spacing, radius } from '@/lib/theme';
 import { Button } from '@/components/ui/Button';
@@ -115,21 +116,25 @@ export default function RecetaDetailScreen() {
         {receta.video_valor && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Video</Text>
-            <TouchableOpacity
-              style={styles.videoBtn}
-              activeOpacity={0.8}
-              onPress={() => {
-                if (receta.video_valor) {
-                  Linking.openURL(receta.video_valor).catch(() => {
-                    Alert.alert('Error', 'No se pudo abrir el video');
-                  });
-                }
-              }}
-            >
-              <Text style={styles.videoBtnText}>
-                {receta.video_tipo === 'url' ? 'Ver video' : 'Abrir video'}
+            {isRemoteUrl(receta.video_valor) ? (
+              <TouchableOpacity
+                style={styles.videoBtn}
+                activeOpacity={0.8}
+                onPress={() => {
+                  if (receta.video_valor) {
+                    Linking.openURL(receta.video_valor).catch(() => {
+                      Alert.alert('Error', 'No se pudo abrir el video');
+                    });
+                  }
+                }}
+              >
+                <Text style={styles.videoBtnText}>Ver video</Text>
+              </TouchableOpacity>
+            ) : (
+              <Text style={styles.videoError}>
+                Video no disponible (archivo local perdido)
               </Text>
-            </TouchableOpacity>
+            )}
           </View>
         )}
 
@@ -243,6 +248,12 @@ const styles = StyleSheet.create({
     fontFamily: 'Nunito-Bold',
     fontSize: fontSize.md,
     color: '#fff',
+  },
+  videoError: {
+    fontFamily: 'Nunito-Regular',
+    fontSize: fontSize.sm,
+    color: colors.textMuted,
+    fontStyle: 'italic',
   },
   actions: {
     flexDirection: 'row',

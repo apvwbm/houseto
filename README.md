@@ -128,6 +128,14 @@ npm run build:web
 
 # Compilar APK con EAS
 eas build --platform android --profile preview
+
+---
+
+npx expo prebuild
+cd ~/Documents/houseto/android
+./gradlew assembleRelease
+cp ~/Documents/houseto/android/app/build/outputs/apk/release/app-arm64-v8a-release.apk ~/Houseto-v1.0.0.apk
+
 ```
 
 ## Licencia

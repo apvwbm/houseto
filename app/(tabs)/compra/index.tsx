@@ -8,25 +8,16 @@ import {
   KeyboardAvoidingView,
   Platform,
   Alert,
-  UIManager,
-  LayoutAnimation,
+  FlatList,
 } from 'react-native';
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Plus, Check, Trash2, X, GripVertical, Pencil } from 'lucide-react-native';
+import { Plus, Check, Trash2, X, GripVertical, Pencil, ArrowDownAZ, Search, ListOrdered } from 'lucide-react-native';
+import DragList, { DragListRenderItemInfo } from 'react-native-draglist';
 import { supabase } from '@/lib/supabase';
 import { ItemCompra } from '@/lib/types';
 import { colors, fontSize, spacing, radius } from '@/lib/theme';
 import { Button } from '@/components/ui/Button';
-import DraggableFlatList, {
-  ScaleDecorator,
-  RenderItemParams,
-} from 'react-native-draggable-flatlist';
-
-// Enable LayoutAnimation on Android
-if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
-}
 
 interface ItemFormData {
   nombre: string;
@@ -61,6 +52,124 @@ type ListItem =
   | (ItemCompra & { type: 'item' })
   | { type: 'separator'; id: string };
 
+const noop = () => {};
+
+/* ─────────────────────────────────────
+   Persistir orden a DB (fire-and-forget, no bloquea UI)
+   ───────────────────────────────────── */
+function persistOrdenToDB(items: ItemCompra[]) {
+  const now = new Date().toISOString();
+  Promise.all(
+    items.map((i) =>
+      supabase
+        .from('lista_compra')
+        .update({ comprado: i.comprado, orden: i.orden, updated_at: now })
+        .eq('id', i.id)
+    )
+  );
+}
+
+/* ─────────────────────────────────────
+   Memoized Item Row (evita re-renders innecesarios)
+   ───────────────────────────────────── */
+interface CompraItemProps {
+  item: ItemCompra & { type: 'item' };
+  isActive: boolean;
+  dragEnabled: boolean;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+  onToggle: (id: string, comprado: boolean) => void;
+  onEdit: (item: ItemCompra) => void;
+  onDelete: (id: string, nombre: string) => void;
+}
+
+const CompraItem = memo(function CompraItem({
+  item,
+  isActive,
+  dragEnabled,
+  onDragStart,
+  onDragEnd,
+  onToggle,
+  onEdit,
+  onDelete,
+}: CompraItemProps) {
+  return (
+    <TouchableOpacity
+      activeOpacity={0.7}
+      style={[
+        styles.itemRow,
+        item.comprado && styles.itemRowComprado,
+        isActive && styles.itemRowActive,
+      ]}
+    >
+      {/* Drag handle */}
+      {dragEnabled && (
+        <TouchableOpacity
+          onPressIn={onDragStart}
+          onPressOut={onDragEnd}
+          style={styles.dragHandle}
+          activeOpacity={0.7}
+        >
+          <GripVertical size={18} color={colors.textMuted} strokeWidth={2} />
+        </TouchableOpacity>
+      )}
+
+      {/* Checkbox + text */}
+      <TouchableOpacity
+        style={[styles.itemContent, !dragEnabled && { paddingLeft: spacing.md }]}
+        onPress={() => onToggle(item.id, item.comprado)}
+        activeOpacity={0.7}
+      >
+        <View style={[styles.checkbox, item.comprado && styles.checkboxChecked]}>
+          {item.comprado && <Check size={14} color="#fff" strokeWidth={3} />}
+        </View>
+        <View style={styles.itemTextWrap}>
+          <Text style={[styles.itemNombre, item.comprado && styles.itemNombreComprado]}>
+            {item.nombre}
+          </Text>
+          {item.cantidad ? (
+            <Text style={styles.itemCantidad}>{item.cantidad}</Text>
+          ) : null}
+        </View>
+      </TouchableOpacity>
+
+      {/* Edit */}
+      <TouchableOpacity
+        onPress={() => onEdit(item)}
+        style={styles.actionBtn}
+        activeOpacity={0.7}
+      >
+        <Pencil size={15} color={colors.textSecondary} strokeWidth={2} />
+      </TouchableOpacity>
+
+      {/* Delete */}
+      <TouchableOpacity
+        onPress={() => onDelete(item.id, item.nombre)}
+        style={styles.actionBtn}
+        activeOpacity={0.7}
+      >
+        <Trash2 size={16} color={colors.error} strokeWidth={2} />
+      </TouchableOpacity>
+    </TouchableOpacity>
+  );
+});
+
+/* ─────────────────────────────────────
+   Separator Row (estático, sin re-renders)
+   ───────────────────────────────────── */
+const SeparatorRow = memo(function SeparatorRow() {
+  return (
+    <View style={styles.separator}>
+      <View style={styles.separatorLine} />
+      <Text style={styles.separatorText}>Comprado</Text>
+      <View style={styles.separatorLine} />
+    </View>
+  );
+});
+
+/* ═════════════════════════════════════
+   PANTALLA PRINCIPAL
+   ═════════════════════════════════════ */
 export default function CompraScreen() {
   const insets = useSafeAreaInsets();
   const [items, setItems] = useState<ItemCompra[]>([]);
@@ -69,15 +178,15 @@ export default function CompraScreen() {
   const [editingItem, setEditingItem] = useState<ItemCompra | null>(null);
   const [form, setForm] = useState<ItemFormData>(emptyForm);
   const [error, setError] = useState('');
+  const [ordenAlfabetico, setOrdenAlfabetico] = useState(false);
+  const [busqueda, setBusqueda] = useState('');
 
   // Ref to always have fresh items in callbacks
   const itemsRef = useRef(items);
   itemsRef.current = items;
 
-  // Refs for stable callbacks (avoid stale closures in renderItem)
-  const toggleCompradoRef = useRef<(id: string, comprado: boolean) => void>(() => {});
-  const openEditFormRef = useRef<(item: ItemCompra) => void>(() => {});
-  const confirmDeleteRef = useRef<(id: string, nombre: string) => void>(() => {});
+  // Guard: evita que el canal Realtime machaque el estado optimista
+  const skipNextRealtimeRef = useRef(false);
 
   const fetchItems = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -100,6 +209,10 @@ export default function CompraScreen() {
     const channel = supabase
       .channel('compra_changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'lista_compra' }, () => {
+        if (skipNextRealtimeRef.current) {
+          skipNextRealtimeRef.current = false;
+          return;
+        }
         fetchItems(true);
       })
       .subscribe();
@@ -108,9 +221,29 @@ export default function CompraScreen() {
     };
   }, [fetchItems]);
 
+  /* ── Filtrado por búsqueda ── */
+  const itemsFiltrados = useMemo(() => {
+    if (!busqueda.trim()) return items;
+    const q = busqueda.toLowerCase().trim();
+    return items.filter(
+      (i) =>
+        i.nombre.toLowerCase().includes(q) ||
+        (i.cantidad && i.cantidad.toLowerCase().includes(q))
+    );
+  }, [items, busqueda]);
+
   /* ── Sorted view: sin marcar arriba, marcados abajo ── */
-  const uncheckedItems = useMemo(() => items.filter((i) => !i.comprado), [items]);
-  const checkedItems = useMemo(() => items.filter((i) => i.comprado), [items]);
+  const uncheckedItems = useMemo(() => {
+    const arr = itemsFiltrados.filter((i) => !i.comprado);
+    if (ordenAlfabetico) return [...arr].sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+    return arr;
+  }, [itemsFiltrados, ordenAlfabetico]);
+
+  const checkedItems = useMemo(() => {
+    const arr = itemsFiltrados.filter((i) => i.comprado);
+    if (ordenAlfabetico) return [...arr].sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+    return arr;
+  }, [itemsFiltrados, ordenAlfabetico]);
 
   /* ── Build flat list data with separator ── */
   const listData: ListItem[] = useMemo(() => {
@@ -152,6 +285,8 @@ export default function CompraScreen() {
       return;
     }
 
+    skipNextRealtimeRef.current = true;
+
     if (editingItem) {
       const { error: err } = await supabase
         .from('lista_compra')
@@ -164,6 +299,7 @@ export default function CompraScreen() {
 
       if (err) {
         setError('Error al guardar');
+        skipNextRealtimeRef.current = false;
         return;
       }
 
@@ -211,8 +347,8 @@ export default function CompraScreen() {
     fetchItems(true);
   }
 
-  /* ── Toggle comprado ── */
-  async function toggleComprado(id: string, comprado: boolean) {
+  /* ── Toggle comprado (optimista, fire-and-forget DB) ── */
+  function toggleComprado(id: string, comprado: boolean) {
     const current = itemsRef.current;
     const item = current.find((i) => i.id === id);
     if (!item) return;
@@ -221,14 +357,12 @@ export default function CompraScreen() {
     let newItems: ItemCompra[];
 
     if (nowChecked) {
-      // Moving to checked: remove from unchecked, add at end of checked with max checked orden + 1
       const unchecked = current.filter((i) => !i.comprado && i.id !== id);
       const checked = current.filter((i) => i.comprado);
       const maxCheckedOrden = checked.length > 0 ? Math.max(...checked.map((i) => i.orden)) : -1;
       const movedItem = { ...item, comprado: true, orden: maxCheckedOrden + 1 };
       newItems = [...normalizeOrden(unchecked), ...normalizeOrden([...checked, movedItem])];
     } else {
-      // Moving to unchecked: remove from checked, add at end of unchecked
       const unchecked = current.filter((i) => !i.comprado);
       const checked = current.filter((i) => i.comprado && i.id !== id);
       const maxUncheckedOrden = unchecked.length > 0 ? Math.max(...unchecked.map((i) => i.orden)) : -1;
@@ -244,19 +378,12 @@ export default function CompraScreen() {
       ...finalChecked.map((i, idx) => ({ ...i, orden: finalUnchecked.length + idx })),
     ];
 
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    // Actualizar UI inmediatamente
     setItems(reordered);
 
-    // Persist
-    const now = new Date().toISOString();
-    const dbUpdates = reordered.map((i) =>
-      supabase.from('lista_compra').update({
-        comprado: i.comprado,
-        orden: i.orden,
-        updated_at: now,
-      }).eq('id', i.id)
-    );
-    await Promise.all(dbUpdates);
+    // Persistir sin bloquear
+    skipNextRealtimeRef.current = true;
+    persistOrdenToDB(reordered);
   }
 
   /* ── Delete with confirmation ── */
@@ -287,43 +414,59 @@ export default function CompraScreen() {
     }));
     const reordered = [...unchecked, ...checked];
 
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setItems(reordered);
+
+    skipNextRealtimeRef.current = true;
 
     // Delete from DB
     const { error: err } = await supabase.from('lista_compra').delete().eq('id', id);
     if (err) {
       setItems(prev);
+      skipNextRealtimeRef.current = false;
       return;
     }
 
-    // Persist new orden for remaining items
-    const now = new Date().toISOString();
-    await Promise.all(
-      reordered.map((i) =>
-        supabase.from('lista_compra').update({ orden: i.orden, updated_at: now }).eq('id', i.id)
-      )
-    );
+    // Persistir nuevo orden
+    persistOrdenToDB(reordered);
   }
 
-  // Keep refs in sync so renderItem always calls fresh versions
+  // Refs estables para callbacks dentro de renderItem
+  const toggleCompradoRef = useRef(toggleComprado);
+  const openEditFormRef = useRef(openEditForm);
+  const confirmDeleteRef = useRef(confirmDelete);
   toggleCompradoRef.current = toggleComprado;
   openEditFormRef.current = openEditForm;
   confirmDeleteRef.current = confirmDelete;
 
-  /* ── Handle drag end: reorder within group only ── */
-  const handleDragEnd = useCallback(({ data: newListData }: { data: ListItem[] }) => {
-    // Extract items from the reordered list (skip separator)
+  // Callbacks estables que usan refs (nunca cambian de referencia)
+  const stableToggle = useCallback((id: string, comprado: boolean) => {
+    toggleCompradoRef.current(id, comprado);
+  }, []);
+  const stableEdit = useCallback((item: ItemCompra) => {
+    openEditFormRef.current(item);
+  }, []);
+  const stableDelete = useCallback((id: string, nombre: string) => {
+    confirmDeleteRef.current(id, nombre);
+  }, []);
+
+  /* ── Dragging allowed only when not filtering/sorting alphabetically ── */
+  const dragEnabled = !ordenAlfabetico && !busqueda.trim();
+
+  /* ── Handle reorder from DragList (síncrono, fire-and-forget DB) ── */
+  const listDataRef = useRef(listData);
+  listDataRef.current = listData;
+
+  const onReordered = useCallback(async (fromIndex: number, toIndex: number) => {
+    const current = [...listDataRef.current];
+    const [removed] = current.splice(fromIndex, 1);
+    current.splice(toIndex, 0, removed);
+
+    // Rebuild items from reordered list (skip separator)
     const newUnchecked: ItemCompra[] = [];
     const newChecked: ItemCompra[] = [];
-    let passedSeparator = false;
 
-    for (const entry of newListData) {
-      if (entry.type === 'separator') {
-        passedSeparator = true;
-        continue;
-      }
-      // Keep original comprado status — don't allow dragging across groups
+    for (const entry of current) {
+      if (entry.type === 'separator') continue;
       if (entry.comprado) {
         newChecked.push(entry);
       } else {
@@ -331,25 +474,21 @@ export default function CompraScreen() {
       }
     }
 
-    // Assign new orden values
     const reordered: ItemCompra[] = [
       ...newUnchecked.map((item, idx) => ({ ...item, orden: idx })),
       ...newChecked.map((item, idx) => ({ ...item, orden: newUnchecked.length + idx })),
     ];
 
+    // Actualizar UI inmediatamente
     setItems(reordered);
 
-    // Persist to DB
-    const now = new Date().toISOString();
-    Promise.all(
-      reordered.map((item) =>
-        supabase.from('lista_compra').update({ orden: item.orden, updated_at: now }).eq('id', item.id)
-      )
-    );
+    // Persistir sin bloquear
+    skipNextRealtimeRef.current = true;
+    persistOrdenToDB(reordered);
   }, []);
 
   /* ── Bulk actions ── */
-  async function markAllComprado() {
+  function markAllComprado() {
     Alert.alert(
       'Marcar todo como comprado',
       '¿Marcar todos los items como comprados?',
@@ -357,30 +496,22 @@ export default function CompraScreen() {
         { text: 'Cancelar', style: 'cancel' },
         {
           text: 'Marcar',
-          onPress: async () => {
-            const now = new Date().toISOString();
+          onPress: () => {
             const all = itemsRef.current.map((i, idx) => ({
               ...i,
               comprado: true,
               orden: idx,
-              updated_at: now,
             }));
-            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
             setItems(all);
-            await Promise.all(
-              all.map((i) =>
-                supabase.from('lista_compra')
-                  .update({ comprado: true, orden: i.orden, updated_at: now })
-                  .eq('id', i.id)
-              )
-            );
+            skipNextRealtimeRef.current = true;
+            persistOrdenToDB(all);
           },
         },
       ]
     );
   }
 
-  async function unmarkAll() {
+  function unmarkAll() {
     Alert.alert(
       'Desmarcar todo',
       '¿Desmarcar todos los items?',
@@ -388,101 +519,67 @@ export default function CompraScreen() {
         { text: 'Cancelar', style: 'cancel' },
         {
           text: 'Desmarcar',
-          onPress: async () => {
-            const now = new Date().toISOString();
+          onPress: () => {
             const all = itemsRef.current.map((i, idx) => ({
               ...i,
               comprado: false,
               orden: idx,
-              updated_at: now,
             }));
-            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
             setItems(all);
-            await Promise.all(
-              all.map((i) =>
-                supabase.from('lista_compra')
-                  .update({ comprado: false, orden: i.orden, updated_at: now })
-                  .eq('id', i.id)
-              )
-            );
+            skipNextRealtimeRef.current = true;
+            persistOrdenToDB(all);
           },
         },
       ]
     );
   }
 
-  /* ── Render item for DraggableFlatList ── */
-  const renderItem = useCallback(
-    ({ item, drag, isActive }: RenderItemParams<ListItem>) => {
+  /* ── Render item para DragList ── */
+  const renderDragItem = useCallback(
+    (info: DragListRenderItemInfo<ListItem>) => {
+      const { item, onDragStart, onDragEnd, isActive } = info;
+
       if (item.type === 'separator') {
-        return (
-          <View style={styles.separator}>
-            <View style={styles.separatorLine} />
-            <Text style={styles.separatorText}>Comprado</Text>
-            <View style={styles.separatorLine} />
-          </View>
-        );
+        return <SeparatorRow />;
       }
 
       return (
-        <ScaleDecorator>
-          <TouchableOpacity
-            activeOpacity={0.7}
-            onLongPress={drag}
-            disabled={isActive}
-            style={[
-              styles.itemRow,
-              item.comprado && styles.itemRowComprado,
-              isActive && styles.itemRowActive,
-            ]}
-          >
-            {/* Drag handle */}
-            <View style={styles.dragHandle}>
-              <GripVertical size={18} color={colors.textMuted} strokeWidth={2} />
-            </View>
-
-            {/* Checkbox + text */}
-            <TouchableOpacity
-              style={styles.itemContent}
-              onPress={() => toggleCompradoRef.current(item.id, item.comprado)}
-              activeOpacity={0.7}
-            >
-              <View style={[styles.checkbox, item.comprado && styles.checkboxChecked]}>
-                {item.comprado && <Check size={14} color="#fff" strokeWidth={3} />}
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.itemNombre, item.comprado && styles.itemNombreComprado]}>
-                  {item.nombre}
-                </Text>
-                {item.cantidad ? (
-                  <Text style={styles.itemCantidad}>{item.cantidad}</Text>
-                ) : null}
-              </View>
-            </TouchableOpacity>
-
-            {/* Edit */}
-            <TouchableOpacity
-              onPress={() => openEditFormRef.current(item)}
-              style={styles.actionBtn}
-              activeOpacity={0.7}
-            >
-              <Pencil size={15} color={colors.textSecondary} strokeWidth={2} />
-            </TouchableOpacity>
-
-            {/* Delete */}
-            <TouchableOpacity
-              onPress={() => confirmDeleteRef.current(item.id, item.nombre)}
-              style={styles.actionBtn}
-              activeOpacity={0.7}
-            >
-              <Trash2 size={16} color={colors.error} strokeWidth={2} />
-            </TouchableOpacity>
-          </TouchableOpacity>
-        </ScaleDecorator>
+        <CompraItem
+          item={item}
+          isActive={isActive}
+          dragEnabled
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+          onToggle={stableToggle}
+          onEdit={stableEdit}
+          onDelete={stableDelete}
+        />
       );
     },
-    // Safe to use [] because all callbacks go through refs that always point to fresh versions
-    []
+    [stableToggle, stableEdit, stableDelete]
+  );
+
+  /* ── Render item para FlatList (sin drag, más ligero) ── */
+  const renderFlatItem = useCallback(
+    ({ item }: { item: ListItem }) => {
+      if (item.type === 'separator') {
+        return <SeparatorRow />;
+      }
+
+      return (
+        <CompraItem
+          item={item}
+          isActive={false}
+          dragEnabled={false}
+          onDragStart={noop}
+          onDragEnd={noop}
+          onToggle={stableToggle}
+          onEdit={stableEdit}
+          onDelete={stableDelete}
+        />
+      );
+    },
+    [stableToggle, stableEdit, stableDelete]
   );
 
   const keyExtractor = useCallback((item: ListItem) => item.id, []);
@@ -494,9 +591,39 @@ export default function CompraScreen() {
     <SafeAreaView style={styles.safeArea} edges={['top']}>
       <View style={styles.topBar}>
         <Text style={styles.title}>Compra</Text>
-        <TouchableOpacity style={styles.addBtn} onPress={openForm} activeOpacity={0.8}>
-          <Plus size={22} color="#fff" strokeWidth={2.5} />
-        </TouchableOpacity>
+        <View style={styles.topBarActions}>
+          <TouchableOpacity
+            style={[styles.sortBtn, ordenAlfabetico && styles.sortBtnActive]}
+            onPress={() => setOrdenAlfabetico((v) => !v)}
+            activeOpacity={0.8}
+          >
+            {ordenAlfabetico ? (
+              <ListOrdered size={18} color={colors.primary} strokeWidth={2.5} />
+            ) : (
+              <ArrowDownAZ size={18} color={colors.textSecondary} strokeWidth={2} />
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.addBtn} onPress={openForm} activeOpacity={0.8}>
+            <Plus size={22} color="#fff" strokeWidth={2.5} />
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Buscador */}
+      <View style={styles.searchContainer}>
+        <Search size={16} color={colors.textMuted} strokeWidth={2} />
+        <TextInput
+          style={styles.searchInput}
+          value={busqueda}
+          onChangeText={setBusqueda}
+          placeholder="Buscar producto..."
+          placeholderTextColor={colors.textMuted}
+        />
+        {busqueda.length > 0 && (
+          <TouchableOpacity onPress={() => setBusqueda('')} activeOpacity={0.7}>
+            <X size={16} color={colors.textMuted} strokeWidth={2} />
+          </TouchableOpacity>
+        )}
       </View>
 
       {loading ? (
@@ -508,16 +635,28 @@ export default function CompraScreen() {
             <Text style={styles.emptyLink}>+ Añadir item</Text>
           </TouchableOpacity>
         </View>
-      ) : (
-        <DraggableFlatList
+      ) : itemsFiltrados.length === 0 ? (
+        <View style={styles.emptyState}>
+          <Text style={styles.emptyText}>Sin resultados para "{busqueda}"</Text>
+        </View>
+      ) : dragEnabled ? (
+        <DragList
           data={listData}
-          renderItem={renderItem}
+          renderItem={renderDragItem}
           keyExtractor={keyExtractor}
-          onDragEnd={handleDragEnd}
+          onReordered={onReordered}
           containerStyle={styles.list}
           contentContainerStyle={[styles.listContent, { paddingBottom: 130 + tabBarHeight }]}
           showsVerticalScrollIndicator={false}
-          activationDistance={15}
+        />
+      ) : (
+        <FlatList
+          data={listData}
+          renderItem={renderFlatItem}
+          keyExtractor={keyExtractor}
+          style={styles.list}
+          contentContainerStyle={[styles.listContent, { paddingBottom: 130 + tabBarHeight }]}
+          showsVerticalScrollIndicator={false}
         />
       )}
 
@@ -626,6 +765,25 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.xl,
     paddingVertical: spacing.md,
   },
+  topBarActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  sortBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  sortBtnActive: {
+    backgroundColor: colors.primaryLight,
+    borderColor: colors.primary,
+  },
   title: {
     fontFamily: 'Nunito-ExtraBold',
     fontSize: fontSize.xxl,
@@ -638,6 +796,26 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginHorizontal: spacing.xl,
+    marginBottom: spacing.md,
+    paddingHorizontal: spacing.md,
+    gap: spacing.sm,
+    height: 40,
+  },
+  searchInput: {
+    flex: 1,
+    fontFamily: 'Nunito-Regular',
+    fontSize: fontSize.sm,
+    color: colors.text,
+    paddingVertical: 0,
   },
   list: {
     flex: 1,
@@ -679,6 +857,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
+  },
+  itemTextWrap: {
+    flex: 1,
   },
   checkbox: {
     width: 22,
