@@ -9,15 +9,48 @@ import {
   Image,
   Linking,
 } from 'react-native';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { Trash2 } from 'lucide-react-native';
+
 import { supabase } from '@/lib/supabase';
 import { isRemoteUrl } from '@/lib/storage';
 import { Receta } from '@/lib/types';
 import { colors, fontSize, spacing, radius } from '@/lib/theme';
 import { Button } from '@/components/ui/Button';
+
+/* ─────────────────────────────────────
+   Helper: renderizar texto con links clicables
+   ───────────────────────────────────── */
+const URL_REGEX = /(https?:\/\/[^\s,;)>\]]+)/gi;
+
+function TextoConLinks({ texto, style }: { texto: string; style: object }) {
+  const parts = texto.split(URL_REGEX);
+
+  const handleLinkPress = useCallback((url: string) => {
+    Linking.openURL(url).catch(() => {
+      Alert.alert('Error', 'No se pudo abrir el enlace');
+    });
+  }, []);
+
+  return (
+    <Text style={style}>
+      {parts.map((part, idx) =>
+        URL_REGEX.test(part) ? (
+          <Text
+            key={idx}
+            style={{ color: colors.primary, textDecorationLine: 'underline' }}
+            onPress={() => handleLinkPress(part)}
+          >
+            {part}
+          </Text>
+        ) : (
+          part
+        )
+      )}
+    </Text>
+  );
+}
 
 export default function RecetaDetailScreen() {
   const { id } = useLocalSearchParams();
@@ -109,7 +142,7 @@ export default function RecetaDetailScreen() {
         {receta.descripcion && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Descripción</Text>
-            <Text style={styles.descripcion}>{receta.descripcion}</Text>
+            <TextoConLinks texto={receta.descripcion} style={styles.descripcion} />
           </View>
         )}
 

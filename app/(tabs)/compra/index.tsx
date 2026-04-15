@@ -19,6 +19,22 @@ import { ItemCompra } from '@/lib/types';
 import { colors, fontSize, spacing, radius } from '@/lib/theme';
 import { Button } from '@/components/ui/Button';
 
+/* ─────────────────────────────────────
+   Helper: buscar items comprados por texto (query a Supabase)
+   ───────────────────────────────────── */
+async function searchCheckedItems(query: string): Promise<ItemCompra[]> {
+  const q = query.trim();
+  if (!q) return [];
+  const { data, error } = await supabase
+    .from('lista_compra')
+    .select('*')
+    .eq('comprado', true)
+    .ilike('nombre', `%${q}%`)
+    .order('orden', { ascending: true });
+  if (error || !data) return [];
+  return data;
+}
+
 interface ItemFormData {
   nombre: string;
   cantidad: string;
@@ -37,12 +53,10 @@ function normalizeOrden(arr: ItemCompra[]): ItemCompra[] {
 }
 
 /* ─────────────────────────────────────
-   Helper: ordenar items (sin marcar arriba por orden, marcados abajo por orden)
+   Helper: ordenar items por orden ascendente
    ───────────────────────────────────── */
-function sortItems(arr: ItemCompra[]): ItemCompra[] {
-  const unchecked = arr.filter((i) => !i.comprado).sort((a, b) => a.orden - b.orden);
-  const checked = arr.filter((i) => i.comprado).sort((a, b) => a.orden - b.orden);
-  return [...unchecked, ...checked];
+function sortByOrden(arr: ItemCompra[]): ItemCompra[] {
+  return [...arr].sort((a, b) => a.orden - b.orden);
 }
 
 /* Separator data item used in the flat list */
@@ -55,9 +69,9 @@ type ListItem =
 const noop = () => {};
 
 /* ─────────────────────────────────────
-   Persistir orden a DB (fire-and-forget, no bloquea UI)
+   Persistir items a DB (fire-and-forget, no bloquea UI)
    ───────────────────────────────────── */
-function persistOrdenToDB(items: ItemCompra[]) {
+function persistItemsToDB(items: ItemCompra[]) {
   const now = new Date().toISOString();
   Promise.all(
     items.map((i) =>
@@ -75,6 +89,7 @@ function persistOrdenToDB(items: ItemCompra[]) {
 interface CompraItemProps {
   item: ItemCompra & { type: 'item' };
   isActive: boolean;
+  isFadingOut: boolean;
   dragEnabled: boolean;
   onDragStart: () => void;
   onDragEnd: () => void;
@@ -86,6 +101,7 @@ interface CompraItemProps {
 const CompraItem = memo(function CompraItem({
   item,
   isActive,
+  isFadingOut,
   dragEnabled,
   onDragStart,
   onDragEnd,
@@ -93,12 +109,13 @@ const CompraItem = memo(function CompraItem({
   onEdit,
   onDelete,
 }: CompraItemProps) {
+  const showChecked = item.comprado || isFadingOut;
   return (
     <TouchableOpacity
       activeOpacity={0.7}
       style={[
         styles.itemRow,
-        item.comprado && styles.itemRowComprado,
+        showChecked && styles.itemRowComprado,
         isActive && styles.itemRowActive,
       ]}
     >
@@ -119,12 +136,13 @@ const CompraItem = memo(function CompraItem({
         style={[styles.itemContent, !dragEnabled && { paddingLeft: spacing.md }]}
         onPress={() => onToggle(item.id, item.comprado)}
         activeOpacity={0.7}
+        disabled={isFadingOut}
       >
-        <View style={[styles.checkbox, item.comprado && styles.checkboxChecked]}>
-          {item.comprado && <Check size={14} color="#fff" strokeWidth={3} />}
+        <View style={[styles.checkbox, showChecked && styles.checkboxChecked]}>
+          {showChecked && <Check size={14} color="#fff" strokeWidth={3} />}
         </View>
         <View style={styles.itemTextWrap}>
-          <Text style={[styles.itemNombre, item.comprado && styles.itemNombreComprado]}>
+          <Text style={[styles.itemNombre, showChecked && styles.itemNombreComprado]}>
             {item.nombre}
           </Text>
           {item.cantidad ? (
@@ -172,7 +190,10 @@ const SeparatorRow = memo(function SeparatorRow() {
    ═════════════════════════════════════ */
 export default function CompraScreen() {
   const insets = useSafeAreaInsets();
+  // items = solo los NO comprados
   const [items, setItems] = useState<ItemCompra[]>([]);
+  // searchCheckedResults = items comprados que coinciden con la búsqueda
+  const [searchCheckedResults, setSearchCheckedResults] = useState<ItemCompra[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editingItem, setEditingItem] = useState<ItemCompra | null>(null);
@@ -185,18 +206,25 @@ export default function CompraScreen() {
   const itemsRef = useRef(items);
   itemsRef.current = items;
 
-  // Guard: evita que el canal Realtime machaque el estado optimista
-  const skipNextRealtimeRef = useRef(false);
+  // Guard temporal: ignora eventos Realtime durante un periodo tras acción optimista
+  const realtimeMutedUntilRef = useRef(0);
+  const muteRealtime = useCallback((ms = 2000) => {
+    realtimeMutedUntilRef.current = Date.now() + ms;
+  }, []);
+
+  // Timer para debounce de búsqueda de comprados
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchItems = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     const { data, error: err } = await supabase
       .from('lista_compra')
       .select('*')
+      .eq('comprado', false)
       .order('orden', { ascending: true });
 
     if (!err && data) {
-      setItems(sortItems(data));
+      setItems(sortByOrden(data));
     }
     if (!silent) setLoading(false);
   }, []);
@@ -209,10 +237,7 @@ export default function CompraScreen() {
     const channel = supabase
       .channel('compra_changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'lista_compra' }, () => {
-        if (skipNextRealtimeRef.current) {
-          skipNextRealtimeRef.current = false;
-          return;
-        }
+        if (Date.now() < realtimeMutedUntilRef.current) return;
         fetchItems(true);
       })
       .subscribe();
@@ -221,7 +246,27 @@ export default function CompraScreen() {
     };
   }, [fetchItems]);
 
-  /* ── Filtrado por búsqueda ── */
+  /* ── Buscar items comprados cuando cambia la búsqueda (debounced) ── */
+  useEffect(() => {
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+
+    const q = busqueda.trim();
+    if (!q) {
+      setSearchCheckedResults([]);
+      return;
+    }
+
+    searchTimerRef.current = setTimeout(async () => {
+      const results = await searchCheckedItems(q);
+      setSearchCheckedResults(results);
+    }, 300);
+
+    return () => {
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    };
+  }, [busqueda]);
+
+  /* ── Filtrado de items no comprados por búsqueda ── */
   const itemsFiltrados = useMemo(() => {
     if (!busqueda.trim()) return items;
     const q = busqueda.toLowerCase().trim();
@@ -232,18 +277,20 @@ export default function CompraScreen() {
     );
   }, [items, busqueda]);
 
-  /* ── Sorted view: sin marcar arriba, marcados abajo ── */
+  /* ── Sorted unchecked items ── */
   const uncheckedItems = useMemo(() => {
-    const arr = itemsFiltrados.filter((i) => !i.comprado);
-    if (ordenAlfabetico) return [...arr].sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
-    return arr;
+    if (ordenAlfabetico) return [...itemsFiltrados].sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+    return itemsFiltrados;
   }, [itemsFiltrados, ordenAlfabetico]);
 
+  /* ── Checked items from search (excluir los que ya están en unchecked por si se desmarcó) ── */
   const checkedItems = useMemo(() => {
-    const arr = itemsFiltrados.filter((i) => i.comprado);
-    if (ordenAlfabetico) return [...arr].sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
-    return arr;
-  }, [itemsFiltrados, ordenAlfabetico]);
+    if (!busqueda.trim()) return [];
+    const uncheckedIds = new Set(items.map((i) => i.id));
+    const filtered = searchCheckedResults.filter((i) => !uncheckedIds.has(i.id));
+    if (ordenAlfabetico) return [...filtered].sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+    return filtered;
+  }, [busqueda, searchCheckedResults, items, ordenAlfabetico]);
 
   /* ── Build flat list data with separator ── */
   const listData: ListItem[] = useMemo(() => {
@@ -285,7 +332,7 @@ export default function CompraScreen() {
       return;
     }
 
-    skipNextRealtimeRef.current = true;
+    muteRealtime();
 
     if (editingItem) {
       const { error: err } = await supabase
@@ -299,7 +346,6 @@ export default function CompraScreen() {
 
       if (err) {
         setError('Error al guardar');
-        skipNextRealtimeRef.current = false;
         return;
       }
 
@@ -311,34 +357,22 @@ export default function CompraScreen() {
         )
       );
     } else {
-      // New item: orden = max orden among unchecked + 1 (goes last in unchecked group)
-      const unchecked = itemsRef.current.filter((i) => !i.comprado);
-      const maxOrden = unchecked.length > 0 ? Math.max(...unchecked.map((i) => i.orden)) : -1;
+      // New item: orden = max orden among current items + 1 (goes last)
+      const current = itemsRef.current;
+      const maxOrden = current.length > 0 ? Math.max(...current.map((i) => i.orden)) : -1;
       const newOrden = maxOrden + 1;
 
-      // Shift all checked items orden up by 1 to make room
-      const checked = itemsRef.current.filter((i) => i.comprado);
-      const updates: PromiseLike<unknown>[] = [];
+      const { error: insertErr } = await supabase.from('lista_compra').insert({
+        nombre: form.nombre.trim(),
+        cantidad: form.cantidad.trim(),
+        comprado: false,
+        orden: newOrden,
+      });
 
-      if (checked.length > 0) {
-        const shiftedChecked = checked.map((i) => ({ ...i, orden: i.orden + 1 }));
-        for (const c of shiftedChecked) {
-          updates.push(
-            supabase.from('lista_compra').update({ orden: c.orden }).eq('id', c.id)
-          );
-        }
+      if (insertErr) {
+        setError('Error al añadir');
+        return;
       }
-
-      updates.push(
-        supabase.from('lista_compra').insert({
-          nombre: form.nombre.trim(),
-          cantidad: form.cantidad.trim(),
-          comprado: false,
-          orden: newOrden,
-        })
-      );
-
-      await Promise.all(updates);
     }
 
     setForm(emptyForm);
@@ -347,43 +381,59 @@ export default function CompraScreen() {
     fetchItems(true);
   }
 
-  /* ── Toggle comprado (optimista, fire-and-forget DB) ── */
-  function toggleComprado(id: string, comprado: boolean) {
-    const current = itemsRef.current;
-    const item = current.find((i) => i.id === id);
-    if (!item) return;
+  /* ── Toggle comprado (optimista + 1 sola query a DB) ── */
+  // IDs de items marcándose como comprados (para animación visual breve)
+  const [fadingOutIds, setFadingOutIds] = useState<Set<string>>(new Set());
 
+  function toggleComprado(id: string, comprado: boolean) {
     const nowChecked = !comprado;
-    let newItems: ItemCompra[];
 
     if (nowChecked) {
-      const unchecked = current.filter((i) => !i.comprado && i.id !== id);
-      const checked = current.filter((i) => i.comprado);
-      const maxCheckedOrden = checked.length > 0 ? Math.max(...checked.map((i) => i.orden)) : -1;
-      const movedItem = { ...item, comprado: true, orden: maxCheckedOrden + 1 };
-      newItems = [...normalizeOrden(unchecked), ...normalizeOrden([...checked, movedItem])];
+      // 1. Feedback visual inmediato: mostrar check antes de quitar
+      setFadingOutIds((prev) => new Set(prev).add(id));
+
+      // 2. Tras un breve delay, quitar de la lista local
+      setTimeout(() => {
+        setFadingOutIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+        setItems((current) => {
+          const remaining = current.filter((i) => i.id !== id);
+          return normalizeOrden(remaining);
+        });
+      }, 250);
+
+      // 3. Persistir solo este item (1 query)
+      muteRealtime();
+      supabase
+        .from('lista_compra')
+        .update({ comprado: true, updated_at: new Date().toISOString() })
+        .eq('id', id)
+        .then(() => {});
     } else {
-      const unchecked = current.filter((i) => !i.comprado);
-      const checked = current.filter((i) => i.comprado && i.id !== id);
-      const maxUncheckedOrden = unchecked.length > 0 ? Math.max(...unchecked.map((i) => i.orden)) : -1;
-      const movedItem = { ...item, comprado: false, orden: maxUncheckedOrden + 1 };
-      newItems = [...normalizeOrden([...unchecked, movedItem]), ...normalizeOrden(checked)];
+      // Desmarcar (viene de searchCheckedResults) -> añadir a la lista local
+      const checkedItem = searchCheckedResults.find((i) => i.id === id);
+      if (!checkedItem) return;
+
+      const current = itemsRef.current;
+      const maxOrden = current.length > 0 ? Math.max(...current.map((i) => i.orden)) : -1;
+      const newOrden = maxOrden + 1;
+      const newItem: ItemCompra = { ...checkedItem, comprado: false, orden: newOrden };
+      setItems((prev) => [...prev, newItem]);
+
+      // Quitar de los resultados de búsqueda de comprados
+      setSearchCheckedResults((prev) => prev.filter((i) => i.id !== id));
+
+      // Persistir solo este item (1 query)
+      muteRealtime();
+      supabase
+        .from('lista_compra')
+        .update({ comprado: false, orden: newOrden, updated_at: new Date().toISOString() })
+        .eq('id', id)
+        .then(() => {});
     }
-
-    // Fix global orden: unchecked 0..N, checked N+1..M
-    const finalUnchecked = newItems.filter((i) => !i.comprado);
-    const finalChecked = newItems.filter((i) => i.comprado);
-    const reordered = [
-      ...finalUnchecked.map((i, idx) => ({ ...i, orden: idx })),
-      ...finalChecked.map((i, idx) => ({ ...i, orden: finalUnchecked.length + idx })),
-    ];
-
-    // Actualizar UI inmediatamente
-    setItems(reordered);
-
-    // Persistir sin bloquear
-    skipNextRealtimeRef.current = true;
-    persistOrdenToDB(reordered);
   }
 
   /* ── Delete with confirmation ── */
@@ -405,29 +455,23 @@ export default function CompraScreen() {
   async function deleteItem(id: string) {
     const prev = itemsRef.current;
     const remaining = prev.filter((i) => i.id !== id);
-
-    // Renormalize orden
-    const unchecked = normalizeOrden(remaining.filter((i) => !i.comprado));
-    const checked = remaining.filter((i) => i.comprado).map((i, idx) => ({
-      ...i,
-      orden: unchecked.length + idx,
-    }));
-    const reordered = [...unchecked, ...checked];
+    const reordered = normalizeOrden(remaining);
 
     setItems(reordered);
+    // También quitar de resultados de búsqueda de comprados por si estaba ahí
+    setSearchCheckedResults((p) => p.filter((i) => i.id !== id));
 
-    skipNextRealtimeRef.current = true;
+    muteRealtime();
 
     // Delete from DB
     const { error: err } = await supabase.from('lista_compra').delete().eq('id', id);
     if (err) {
       setItems(prev);
-      skipNextRealtimeRef.current = false;
       return;
     }
 
     // Persistir nuevo orden
-    persistOrdenToDB(reordered);
+    persistItemsToDB(reordered);
   }
 
   // Refs estables para callbacks dentro de renderItem
@@ -461,78 +505,23 @@ export default function CompraScreen() {
     const [removed] = current.splice(fromIndex, 1);
     current.splice(toIndex, 0, removed);
 
-    // Rebuild items from reordered list (skip separator)
-    const newUnchecked: ItemCompra[] = [];
-    const newChecked: ItemCompra[] = [];
+    // Rebuild items from reordered list (skip separator, solo unchecked)
+    const reordered: ItemCompra[] = [];
 
     for (const entry of current) {
       if (entry.type === 'separator') continue;
-      if (entry.comprado) {
-        newChecked.push(entry);
-      } else {
-        newUnchecked.push(entry);
+      if (!entry.comprado) {
+        reordered.push({ ...entry, orden: reordered.length });
       }
     }
-
-    const reordered: ItemCompra[] = [
-      ...newUnchecked.map((item, idx) => ({ ...item, orden: idx })),
-      ...newChecked.map((item, idx) => ({ ...item, orden: newUnchecked.length + idx })),
-    ];
 
     // Actualizar UI inmediatamente
     setItems(reordered);
 
     // Persistir sin bloquear
-    skipNextRealtimeRef.current = true;
-    persistOrdenToDB(reordered);
-  }, []);
-
-  /* ── Bulk actions ── */
-  function markAllComprado() {
-    Alert.alert(
-      'Marcar todo como comprado',
-      '¿Marcar todos los items como comprados?',
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        {
-          text: 'Marcar',
-          onPress: () => {
-            const all = itemsRef.current.map((i, idx) => ({
-              ...i,
-              comprado: true,
-              orden: idx,
-            }));
-            setItems(all);
-            skipNextRealtimeRef.current = true;
-            persistOrdenToDB(all);
-          },
-        },
-      ]
-    );
-  }
-
-  function unmarkAll() {
-    Alert.alert(
-      'Desmarcar todo',
-      '¿Desmarcar todos los items?',
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        {
-          text: 'Desmarcar',
-          onPress: () => {
-            const all = itemsRef.current.map((i, idx) => ({
-              ...i,
-              comprado: false,
-              orden: idx,
-            }));
-            setItems(all);
-            skipNextRealtimeRef.current = true;
-            persistOrdenToDB(all);
-          },
-        },
-      ]
-    );
-  }
+    muteRealtime();
+    persistItemsToDB(reordered);
+  }, [muteRealtime]);
 
   /* ── Render item para DragList ── */
   const renderDragItem = useCallback(
@@ -547,6 +536,7 @@ export default function CompraScreen() {
         <CompraItem
           item={item}
           isActive={isActive}
+          isFadingOut={fadingOutIds.has(item.id)}
           dragEnabled
           onDragStart={onDragStart}
           onDragEnd={onDragEnd}
@@ -556,7 +546,7 @@ export default function CompraScreen() {
         />
       );
     },
-    [stableToggle, stableEdit, stableDelete]
+    [stableToggle, stableEdit, stableDelete, fadingOutIds]
   );
 
   /* ── Render item para FlatList (sin drag, más ligero) ── */
@@ -570,6 +560,7 @@ export default function CompraScreen() {
         <CompraItem
           item={item}
           isActive={false}
+          isFadingOut={fadingOutIds.has(item.id)}
           dragEnabled={false}
           onDragStart={noop}
           onDragEnd={noop}
@@ -579,7 +570,7 @@ export default function CompraScreen() {
         />
       );
     },
-    [stableToggle, stableEdit, stableDelete]
+    [stableToggle, stableEdit, stableDelete, fadingOutIds]
   );
 
   const keyExtractor = useCallback((item: ListItem) => item.id, []);
@@ -628,16 +619,16 @@ export default function CompraScreen() {
 
       {loading ? (
         <ActivityIndicator color={colors.primary} size="large" style={{ marginTop: 40 }} />
-      ) : items.length === 0 ? (
+      ) : items.length === 0 && !busqueda.trim() ? (
         <View style={styles.emptyState}>
           <Text style={styles.emptyText}>Sin items en la compra</Text>
           <TouchableOpacity onPress={openForm} activeOpacity={0.8}>
             <Text style={styles.emptyLink}>+ Añadir item</Text>
           </TouchableOpacity>
         </View>
-      ) : itemsFiltrados.length === 0 ? (
+      ) : uncheckedItems.length === 0 && checkedItems.length === 0 ? (
         <View style={styles.emptyState}>
-          <Text style={styles.emptyText}>Sin resultados para "{busqueda}"</Text>
+          <Text style={styles.emptyText}>Sin resultados para &quot;{busqueda}&quot;</Text>
         </View>
       ) : dragEnabled ? (
         <DragList
@@ -646,7 +637,7 @@ export default function CompraScreen() {
           keyExtractor={keyExtractor}
           onReordered={onReordered}
           containerStyle={styles.list}
-          contentContainerStyle={[styles.listContent, { paddingBottom: 130 + tabBarHeight }]}
+          contentContainerStyle={[styles.listContent, { paddingBottom: 80 + tabBarHeight }]}
           showsVerticalScrollIndicator={false}
         />
       ) : (
@@ -655,7 +646,7 @@ export default function CompraScreen() {
           renderItem={renderFlatItem}
           keyExtractor={keyExtractor}
           style={styles.list}
-          contentContainerStyle={[styles.listContent, { paddingBottom: 130 + tabBarHeight }]}
+          contentContainerStyle={[styles.listContent, { paddingBottom: 80 + tabBarHeight }]}
           showsVerticalScrollIndicator={false}
         />
       )}
@@ -727,24 +718,6 @@ export default function CompraScreen() {
         </KeyboardAvoidingView>
       )}
 
-      {items.length > 0 && (
-        <View style={styles.globalActions}>
-          <Button
-            title="Marcar todo comprado"
-            onPress={markAllComprado}
-            variant="secondary"
-            size="sm"
-            style={{ flex: 1 }}
-          />
-          <Button
-            title="Desmarcar todo"
-            onPress={unmarkAll}
-            variant="ghost"
-            size="sm"
-            style={{ flex: 1 }}
-          />
-        </View>
-      )}
     </SafeAreaView>
   );
 }
@@ -987,14 +960,5 @@ const styles = StyleSheet.create({
   formActions: {
     flexDirection: 'row',
     gap: spacing.lg,
-  },
-  globalActions: {
-    flexDirection: 'row',
-    gap: spacing.lg,
-    paddingHorizontal: spacing.xl,
-    paddingVertical: spacing.md,
-    backgroundColor: colors.surface,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
   },
 });

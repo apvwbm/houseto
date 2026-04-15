@@ -9,7 +9,7 @@ import {
   Image,
   TextInput,
 } from 'react-native';
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Plus, Check, Search, X } from 'lucide-react-native';
@@ -18,40 +18,78 @@ import { Receta } from '@/lib/types';
 import { useLookups } from '@/hooks/useLookups';
 import { colors, fontSize, spacing, radius } from '@/lib/theme';
 
+const PAGE_SIZE = 20;
+
 export default function RecetasScreen() {
   const router = useRouter();
   const { categoriasRecetas } = useLookups();
   const [recetas, setRecetas] = useState<Receta[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
   const [selectedCategorias, setSelectedCategorias] = useState<string[]>([]);
   const [busqueda, setBusqueda] = useState('');
 
-  const fetchRecetas = useCallback(async () => {
-    setLoading(true);
+  // Ref para saber el offset actual de la paginación
+  const offsetRef = useRef(0);
+
+  const fetchRecetas = useCallback(async (reset = true) => {
+    if (reset) {
+      setLoading(true);
+      offsetRef.current = 0;
+    } else {
+      setLoadingMore(true);
+    }
+
+    const from = reset ? 0 : offsetRef.current;
+    const to = from + PAGE_SIZE - 1;
+
     const { data, error } = await supabase
       .from('recetas')
       .select('*')
-      .order('nombre', { ascending: true });
+      .order('nombre', { ascending: true })
+      .range(from, to);
 
-    if (!error && data) setRecetas(data);
-    setLoading(false);
+    if (!error && data) {
+      if (reset) {
+        setRecetas(data);
+      } else {
+        setRecetas((prev) => {
+          // Evitar duplicados por si Realtime disparó un refetch intermedio
+          const existingIds = new Set(prev.map((r) => r.id));
+          const newItems = data.filter((r) => !existingIds.has(r.id));
+          return [...prev, ...newItems];
+        });
+      }
+      offsetRef.current = from + data.length;
+      setHasMore(data.length === PAGE_SIZE);
+    }
+
+    if (reset) setLoading(false);
+    else setLoadingMore(false);
   }, []);
 
   useEffect(() => {
-    fetchRecetas();
+    fetchRecetas(true);
   }, [fetchRecetas]);
 
   useEffect(() => {
     const channel = supabase
       .channel('recetas_changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'recetas' }, () => {
-        fetchRecetas();
+        fetchRecetas(true);
       })
       .subscribe();
     return () => {
       supabase.removeChannel(channel);
     };
   }, [fetchRecetas]);
+
+  const loadMore = useCallback(() => {
+    if (!loadingMore && hasMore && !busqueda.trim() && selectedCategorias.length === 0) {
+      fetchRecetas(false);
+    }
+  }, [loadingMore, hasMore, busqueda, selectedCategorias, fetchRecetas]);
 
   const filteredRecetas = useMemo(() => {
     let resultado = recetas;
@@ -201,6 +239,13 @@ export default function RecetasScreen() {
           numColumns={2}
           columnWrapperStyle={styles.gridRow}
           showsVerticalScrollIndicator={false}
+          onEndReached={loadMore}
+          onEndReachedThreshold={0.5}
+          ListFooterComponent={
+            loadingMore ? (
+              <ActivityIndicator color={colors.primary} style={{ paddingVertical: spacing.lg }} />
+            ) : null
+          }
         />
       )}
     </SafeAreaView>
