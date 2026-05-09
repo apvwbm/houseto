@@ -4,29 +4,39 @@
     "slug": "houseto",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/icon.png",
     "scheme": "houseto",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.houseto.app"
     },
+
     "android": {
       "package": "com.houseto.app",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/icon.png",
+        "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#7C2D3A"
       },
       "permissions": [
         "android.permission.RECORD_AUDIO"
       ]
     },
+
     "web": {
       "bundler": "metro",
       "output": "single",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/favicon.png"
     },
+
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+
     "plugins": [
       "expo-router",
       "expo-font",
@@ -34,11 +44,12 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Permitir acceso a fotos para añadir imágenes a las recetas",
-          "cameraPermission": "Permitir acceso a la cámara para tomar fotos de recetas"
+          "photosPermission": "Permitir acceso a fotos",
+          "cameraPermission": "Permitir acceso a la cámara"
         }
       ]
     ],
+
     "experiments": {
       "typedRoutes": true
     }

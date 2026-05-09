@@ -9,15 +9,19 @@ import {
   Platform,
   Alert,
   FlatList,
+  RefreshControl,
+  Animated,
 } from 'react-native';
 import React, { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Plus, Check, Trash2, X, GripVertical, Pencil, ArrowDownAZ, Search, ListOrdered } from 'lucide-react-native';
+import { Plus, Check, Trash2, X, GripVertical, Pencil, ArrowDownAZ, Search, ListOrdered, RotateCcw } from 'lucide-react-native';
 import DragList, { DragListRenderItemInfo } from 'react-native-draglist';
 import { supabase } from '@/lib/supabase';
 import { ItemCompra } from '@/lib/types';
 import { colors, fontSize, spacing, radius } from '@/lib/theme';
 import { Button } from '@/components/ui/Button';
+import { RefreshButton } from '@/components/ui/RefreshButton';
+
 
 /* ─────────────────────────────────────
    Helper: buscar items comprados por texto (query a Supabase)
@@ -195,6 +199,7 @@ export default function CompraScreen() {
   // searchCheckedResults = items comprados que coinciden con la búsqueda
   const [searchCheckedResults, setSearchCheckedResults] = useState<ItemCompra[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingItem, setEditingItem] = useState<ItemCompra | null>(null);
   const [form, setForm] = useState<ItemFormData>(emptyForm);
@@ -228,6 +233,28 @@ export default function CompraScreen() {
     }
     if (!silent) setLoading(false);
   }, []);
+
+  const handleRefresh = useCallback(async () => {
+    setIsRefreshing(true);
+    // Fetch items no comprados
+    const { data, error: err } = await supabase
+      .from('lista_compra')
+      .select('*')
+      .eq('comprado', false)
+      .order('orden', { ascending: true });
+
+    if (!err && data) {
+      setItems(sortByOrden(data));
+    }
+
+    // Si hay búsqueda activa, también refrescar los resultados de comprados
+    if (busqueda.trim()) {
+      const results = await searchCheckedItems(busqueda);
+      setSearchCheckedResults(results);
+    }
+
+    setIsRefreshing(false);
+  }, [busqueda]);
 
   useEffect(() => {
     fetchItems();
@@ -385,15 +412,117 @@ export default function CompraScreen() {
   // IDs de items marcándose como comprados (para animación visual breve)
   const [fadingOutIds, setFadingOutIds] = useState<Set<string>>(new Set());
 
+  /* ── Snackbar de deshacer ── */
+  // Item que se acaba de marcar como comprado (para poder revertirlo)
+  const [accionDeshacer, setAccionDeshacer] = useState<{ item: ItemCompra } | null>(null);
+  // Timer de auto-cierre del snackbar (4 segundos)
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // IDs de toggles cancelados por el usuario (evita que el setTimeout los elimine)
+  const cancelledToggleIdsRef = useRef<Set<string>>(new Set());
+  // Valor animado para el deslizamiento del snackbar desde abajo
+  const snackbarAnim = useRef(new Animated.Value(0)).current;
+
+  // Limpiar timer al desmontar el componente
+  useEffect(() => {
+    return () => {
+      if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    };
+  }, []);
+
+  /* ── Mostrar snackbar con opción de deshacer ── */
+  function mostrarSnackbar(item: ItemCompra) {
+    snackbarAnim.setValue(0);
+    setAccionDeshacer({ item });
+    Animated.spring(snackbarAnim, {
+      toValue: 1,
+      useNativeDriver: true,
+      damping: 20,
+      stiffness: 300,
+    }).start();
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    undoTimerRef.current = setTimeout(() => {
+      ocultarSnackbar();
+    }, 4000);
+  }
+
+  /* ── Ocultar snackbar con animación de salida ── */
+  function ocultarSnackbar() {
+    if (undoTimerRef.current) {
+      clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = null;
+    }
+    Animated.timing(snackbarAnim, {
+      toValue: 0,
+      duration: 200,
+      useNativeDriver: true,
+    }).start(() => setAccionDeshacer(null));
+  }
+
+  /* ── Deshacer la última acción de marcar como comprado ── */
+  function deshacerAccion() {
+    if (!accionDeshacer) return;
+    const { item } = accionDeshacer;
+
+    // Cancelar timer de auto-cierre
+    if (undoTimerRef.current) {
+      clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = null;
+    }
+
+    // Marcar el toggle como cancelado: el setTimeout del fade no eliminará el item
+    cancelledToggleIdsRef.current.add(item.id);
+
+    // Ocultar snackbar
+    Animated.timing(snackbarAnim, {
+      toValue: 0,
+      duration: 200,
+      useNativeDriver: true,
+    }).start(() => setAccionDeshacer(null));
+
+    // Quitar de fadingOutIds por si el item todavía está en la animación de fade
+    setFadingOutIds((prev) => {
+      const next = new Set(prev);
+      next.delete(item.id);
+      return next;
+    });
+
+    // Restaurar item en la lista en su posición original
+    setItems((current) => {
+      // Si el item sigue en la lista (undo muy rápido, <250ms), no hacer nada
+      if (current.some((i) => i.id === item.id)) return current;
+      // Insertar en la posición original y renormalizar orden
+      const newItems = [...current];
+      const insertAt = Math.min(item.orden, newItems.length);
+      newItems.splice(insertAt, 0, { ...item, comprado: false });
+      return normalizeOrden(newItems);
+    });
+
+    // Revertir en DB: volver a comprado=false
+    muteRealtime();
+    supabase
+      .from('lista_compra')
+      .update({ comprado: false, updated_at: new Date().toISOString() })
+      .eq('id', item.id)
+      .then(() => {});
+  }
+
   function toggleComprado(id: string, comprado: boolean) {
     const nowChecked = !comprado;
 
     if (nowChecked) {
+      // Capturar el item antes de que sea eliminado (para poder revertir)
+      const itemCapturado = itemsRef.current.find((i) => i.id === id);
+
       // 1. Feedback visual inmediato: mostrar check antes de quitar
       setFadingOutIds((prev) => new Set(prev).add(id));
 
       // 2. Tras un breve delay, quitar de la lista local
       setTimeout(() => {
+        // Si el usuario pulsó "Deshacer", no eliminar
+        if (cancelledToggleIdsRef.current.has(id)) {
+          cancelledToggleIdsRef.current.delete(id);
+          return;
+        }
         setFadingOutIds((prev) => {
           const next = new Set(prev);
           next.delete(id);
@@ -412,6 +541,11 @@ export default function CompraScreen() {
         .update({ comprado: true, updated_at: new Date().toISOString() })
         .eq('id', id)
         .then(() => {});
+
+      // 4. Mostrar snackbar de deshacer
+      if (itemCapturado) {
+        mostrarSnackbar(itemCapturado);
+      }
     } else {
       // Desmarcar (viene de searchCheckedResults) -> añadir a la lista local
       const checkedItem = searchCheckedResults.find((i) => i.id === id);
@@ -578,12 +712,13 @@ export default function CompraScreen() {
   // Tab bar height to account for in overlays
   const tabBarHeight = 64 + insets.bottom;
 
-  return (
-    <SafeAreaView style={styles.safeArea} edges={['top']}>
-      <View style={styles.topBar}>
-        <Text style={styles.title}>Compra</Text>
-        <View style={styles.topBarActions}>
-          <TouchableOpacity
+   return (
+     <SafeAreaView style={styles.safeArea} edges={['top']}>
+       <View style={styles.topBar}>
+         <Text style={styles.title}>Compra</Text>
+         <View style={styles.topBarActions}>
+           <RefreshButton isRefreshing={isRefreshing} onPress={handleRefresh} />
+           <TouchableOpacity
             style={[styles.sortBtn, ordenAlfabetico && styles.sortBtnActive]}
             onPress={() => setOrdenAlfabetico((v) => !v)}
             activeOpacity={0.8}
@@ -640,7 +775,7 @@ export default function CompraScreen() {
           contentContainerStyle={[styles.listContent, { paddingBottom: 80 + tabBarHeight }]}
           showsVerticalScrollIndicator={false}
         />
-      ) : (
+             ) : (
         <FlatList
           data={listData}
           renderItem={renderFlatItem}
@@ -648,6 +783,13 @@ export default function CompraScreen() {
           style={styles.list}
           contentContainerStyle={[styles.listContent, { paddingBottom: 80 + tabBarHeight }]}
           showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={isRefreshing}
+              onRefresh={handleRefresh}
+              tintColor={colors.primary}
+            />
+          }
         />
       )}
 
@@ -715,7 +857,36 @@ export default function CompraScreen() {
               />
             </View>
           </View>
-        </KeyboardAvoidingView>
+         </KeyboardAvoidingView>
+       )}
+
+      {/* Snackbar de deshacer (aparece al marcar un item como comprado) */}
+      {accionDeshacer && (
+        <Animated.View
+          style={[
+            styles.snackbar,
+            {
+              bottom: tabBarHeight + spacing.md,
+              transform: [
+                {
+                  translateY: snackbarAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [80, 0],
+                  }),
+                },
+              ],
+              opacity: snackbarAnim,
+            },
+          ]}
+        >
+          <Text style={styles.snackbarText} numberOfLines={1}>
+            «{accionDeshacer.item.nombre}» marcado
+          </Text>
+          <TouchableOpacity onPress={deshacerAccion} style={styles.snackbarBtn} activeOpacity={0.8}>
+            <RotateCcw size={14} color="#fff" strokeWidth={2.5} />
+            <Text style={styles.snackbarBtnText}>Deshacer</Text>
+          </TouchableOpacity>
+        </Animated.View>
       )}
 
     </SafeAreaView>
@@ -960,5 +1131,46 @@ const styles = StyleSheet.create({
   formActions: {
     flexDirection: 'row',
     gap: spacing.lg,
+  },
+  snackbar: {
+    position: 'absolute',
+    left: spacing.lg,
+    right: spacing.lg,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: spacing.lg,
+    paddingRight: spacing.sm,
+    paddingVertical: spacing.md,
+    gap: spacing.md,
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    zIndex: 100,
+  },
+  snackbarText: {
+    fontFamily: 'Nunito-SemiBold',
+    fontSize: fontSize.sm,
+    color: colors.text,
+    flex: 1,
+  },
+  snackbarBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.primary,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.sm,
+  },
+  snackbarBtnText: {
+    fontFamily: 'Nunito-Bold',
+    fontSize: fontSize.sm,
+    color: '#fff',
   },
 });

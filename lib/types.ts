@@ -37,7 +37,7 @@ export interface ItemCompra {
 }
 
 // Fallback constants — used only if DB lookup fails
-export const QUIEN_OPTIONS: string[] = ['Aitor', 'Aita', 'Ama'];
+export const QUIEN_OPTIONS: string[] = ['Todos', 'Aitor', 'Aita', 'Ama'];
 
 export const CATEGORIAS_RECETAS = [
   'Carne',
@@ -54,6 +54,7 @@ export const CATEGORIAS_RECETAS = [
 
 
 export const QUIEN_COLORS: Record<string, string> = {
+  Todos: '#d1d1d1',
   Aitor: '#2563EB',
   Aita: '#059669',
   Ama: '#7C2D3A',
